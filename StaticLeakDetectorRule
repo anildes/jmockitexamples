@@ -1,0 +1,100 @@
+package leakdetect;
+
+import io.github.classgraph.ClassGraph;
+import io.github.classgraph.ClassInfo;
+import io.github.classgraph.ScanResult;
+import org.junit.rules.TestRule;
+import org.junit.runner.Description;
+import org.junit.runners.model.Statement;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Objects;
+
+public class StaticLeakDetectorRule implements TestRule {
+
+    private final String packageToScan;
+    private Map<String, Object> beforeSnapshot;
+
+    public StaticLeakDetectorRule(String packageToScan) {
+        this.packageToScan = packageToScan;
+    }
+
+    @Override
+    public Statement apply(Statement base, Description description) {
+        return new Statement() {
+            @Override
+            public void evaluate() throws Throwable {
+
+                System.out.println(">>> StaticLeakDetectorRule ACTIVE");
+
+                beforeSnapshot = scanPackage(packageToScan);
+
+                try {
+                    base.evaluate();
+                } finally {
+                    Map<String, Object> afterSnapshot = scanPackage(packageToScan);
+
+                    for (Map.Entry<String, Object> entry : afterSnapshot.entrySet()) {
+                        String key = entry.getKey();
+                        Object afterValue = entry.getValue();
+                        Object beforeValue = beforeSnapshot.get(key);
+
+                        if (!Objects.equals(beforeValue, afterValue)) {
+                            System.out.println("Static field changed: " + key +
+                                    " | before: " + beforeValue +
+                                    " | after: " + afterValue);
+
+                            resetStaticField(key, beforeValue);
+                        }
+                    }
+                }
+            }
+        };
+    }
+
+    private Map<String, Object> scanPackage(String pkg) {
+        Map<String, Object> result = new HashMap<>();
+
+        try (ScanResult scanResult = new ClassGraph()
+                .enableClassInfo()
+                .acceptPackages(pkg)
+                .scan()) {
+
+            for (ClassInfo ci : scanResult.getAllClasses()) {
+                Class<?> clazz = ci.loadClass();
+
+                for (Field field : clazz.getDeclaredFields()) {
+                    if (Modifier.isStatic(field.getModifiers())) {
+                        try {
+                            field.setAccessible(true);
+                            result.put(clazz.getName() + "." + field.getName(),
+                                    field.get(null));
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+    private void resetStaticField(String fullFieldName, Object originalValue) {
+        try {
+            int lastDot = fullFieldName.lastIndexOf('.');
+            String className = fullFieldName.substring(0, lastDot);
+            String fieldName = fullFieldName.substring(lastDot + 1);
+
+            Class<?> clazz = Class.forName(className);
+            Field field = clazz.getDeclaredField(fieldName);
+            field.setAccessible(true);
+            field.set(null, originalValue);
+
+            System.out.println("Static field reset: " + fullFieldName);
+        } catch (Throwable t) {
+            t.printStackTrace();
+        }
+    }
+}
